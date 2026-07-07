@@ -1,0 +1,73 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Semantic design tokens. Colors are stored as HSL channels so Tailwind can
+ * apply opacity (hsl(var(--x) / <alpha-value>)). The entire UI re-themes from
+ * the single `.dark` override block below — no per-component color logic.
+ */
+@layer base {
+  :root {
+    --bg: 210 20% 98%;
+    --surface: 0 0% 100%;
+    --card: 0 0% 100%;
+    --border: 220 13% 91%;
+    --muted: 220 14% 96%;
+    --fg: 222 47% 11%;
+    --fg-muted: 220 9% 40%;
+    --primary: 243 75% 58%;
+    --primary-fg: 0 0% 100%;
+    --success: 142 71% 36%;
+    --warning: 32 90% 40%;
+    --danger: 0 72% 48%;
+    --shadow: 222 47% 11%;
+  }
+
+  .dark {
+    --bg: 222 47% 8%;
+    --surface: 222 40% 11%;
+    --card: 222 40% 13%;
+    --border: 220 16% 24%;
+    --muted: 220 20% 18%;
+    --fg: 210 20% 96%;
+    --fg-muted: 220 12% 68%;
+    --primary: 243 80% 70%;
+    --primary-fg: 222 47% 10%;
+    --success: 142 60% 52%;
+    --warning: 38 92% 60%;
+    --danger: 0 72% 64%;
+    --shadow: 0 0% 0%;
+  }
+
+  html {
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-bg text-fg antialiased;
+    font-feature-settings: "cv11", "ss01";
+  }
+
+  /* Respect users who prefer reduced motion. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl border border-border bg-card shadow-card;
+  }
+  .focus-ring {
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:ring-offset-2 focus-visible:ring-offset-bg;
+  }
+}

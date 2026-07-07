@@ -1,0 +1,151 @@
+# Meeting Intelligence Pipeline — full local stack.
+#
+# The database is Neon (serverless Postgres), configured via DATABASE_URL in
+# backend/.env — there is NO local postgres container. Redis (the Celery broker)
+# still runs locally in the stack.
+#
+# Services:
+#   redis                 Celery broker + result backend
+#   migrate               one-shot Alembic upgrade against Neon (gates api+workers)
+#   api                   FastAPI (behind the frontend's /api proxy)
+#   worker-audio          Audio Worker      (queue: audio.q)
+#   worker-transcript     Transcript Worker (queue: transcript.q)
+#   worker-summary        Summary Worker    (queue: summary.q)
+#   worker-checklist      Checklist Worker  (queue: checklist.q)
+#   frontend              React SPA served by nginx (proxies /api -> api)
+#
+# Config comes from backend/.env (loaded via env_file). The `environment` blocks
+# below only OVERRIDE the values that must differ inside the compose network
+# (Redis hostname, storage path) — DATABASE_URL and provider keys come from
+# backend/.env unchanged.
+
+x-backend-build: &backend-build
+  build:
+    context: ./backend
+    dockerfile: docker/Dockerfile
+
+# Compose-network overrides applied on top of backend/.env.
+x-backend-overrides: &backend-overrides
+  REDIS_URL: redis://redis:6379/0
+  STORAGE_LOCAL_DIR: /data/audio
+  LOG_JSON: "true"
+
+services:
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    <<: *backend-build
+    env_file: [./backend/.env]
+    environment:
+      <<: *backend-overrides
+    entrypoint: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  api:
+    <<: *backend-build
+    env_file: [./backend/.env]
+    environment:
+      <<: *backend-overrides
+      API_WORKERS: ${API_WORKERS:-2}
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - audio:/data/audio
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/v1/health').status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "8000:8000"
+
+  worker-audio:
+    <<: *backend-build
+    env_file: [./backend/.env]
+    entrypoint: ["entrypoint-worker.sh"]
+    environment:
+      <<: *backend-overrides
+      WORKER_QUEUE: audio.q
+      WORKER_NAME: audio
+      WORKER_CONCURRENCY: ${AUDIO_CONCURRENCY:-1}
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - audio:/data/audio
+
+  worker-transcript:
+    <<: *backend-build
+    env_file: [./backend/.env]
+    entrypoint: ["entrypoint-worker.sh"]
+    environment:
+      <<: *backend-overrides
+      WORKER_QUEUE: transcript.q
+      WORKER_NAME: transcript
+      WORKER_CONCURRENCY: ${TRANSCRIPT_CONCURRENCY:-2}
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - audio:/data/audio
+
+  worker-summary:
+    <<: *backend-build
+    env_file: [./backend/.env]
+    entrypoint: ["entrypoint-worker.sh"]
+    environment:
+      <<: *backend-overrides
+      WORKER_QUEUE: summary.q
+      WORKER_NAME: summary
+      WORKER_CONCURRENCY: ${SUMMARY_CONCURRENCY:-2}
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - audio:/data/audio
+
+  worker-checklist:
+    <<: *backend-build
+    env_file: [./backend/.env]
+    entrypoint: ["entrypoint-worker.sh"]
+    environment:
+      <<: *backend-overrides
+      WORKER_QUEUE: checklist.q
+      WORKER_NAME: checklist
+      WORKER_CONCURRENCY: ${CHECKLIST_CONCURRENCY:-2}
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - audio:/data/audio
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: docker/Dockerfile
+      args:
+        VITE_API_URL: /api/v1
+    depends_on:
+      - api
+    ports:
+      - "8080:80"
+
+volumes:
+  audio:
