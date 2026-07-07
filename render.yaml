@@ -1,16 +1,16 @@
-# Render Blueprint — deploy SheryMeet on the FREE tier.
+# Render Blueprint — deploy the SheryMeet BACKEND on the FREE tier.
 #
-# Topology on free tier (Render has no free background workers / Redis for real
-# async), so the API runs the pipeline INLINE (CELERY_TASK_ALWAYS_EAGER=true):
+# The frontend is deployed separately on Vercel (see frontend/vercel.json), so
+# this blueprint provisions the API only. Free tier has no background workers /
+# Redis, so the API runs the pipeline INLINE (CELERY_TASK_ALWAYS_EAGER=true):
 #
 #   Neon (external, free)            → Postgres
-#   Render Static Site (free)        → React SPA  (sherymeet-web)
 #   Render Web Service, Docker (free)→ FastAPI + inline pipeline (sherymeet-api)
+#   Vercel (external, free)          → React SPA (VITE_API_URL → this API)
 #
 # Set the two SECRET env vars (DATABASE_URL, GROQ_API_KEY) in the Render dashboard
 # (they are marked sync:false and are NOT stored in this file). After the first
-# deploy, update the two cross-referenced URLs (CORS_ALLOW_ORIGINS, VITE_API_URL)
-# to the real service URLs Render assigns, then redeploy.
+# deploy, set CORS_ALLOW_ORIGINS to your Vercel domain, then redeploy.
 
 services:
   # ── Backend API (Docker; runs migrations on boot, serves + processes) ────────
@@ -45,20 +45,4 @@ services:
       - key: LOG_JSON
         value: "true"
       - key: CORS_ALLOW_ORIGINS
-        value: https://sherymeet-web.onrender.com   # <-- set to your static site URL
-
-  # ── Frontend SPA (static site) ───────────────────────────────────────────────
-  - type: web
-    name: sherymeet-web
-    runtime: static
-    plan: free
-    rootDir: frontend
-    buildCommand: npm ci && npm run build
-    staticPublishPath: ./dist
-    envVars:
-      - key: VITE_API_URL
-        value: https://sherymeet-api.onrender.com/api/v1   # <-- set to your API URL
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
+        value: https://sherymeet.vercel.app   # <-- set to your Vercel domain (no trailing slash)
