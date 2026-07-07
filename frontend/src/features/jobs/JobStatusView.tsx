@@ -6,6 +6,7 @@ import type { JobStatus } from "@/api/jobs";
 import { Button, Card, ProgressBar, StatusPill, cx } from "@/components/ui";
 import { PIPELINE_STEPS, statusIndex, statusLabel, statusTone } from "@/lib/status";
 import { updateJob } from "@/lib/history";
+import { classifyError } from "@/lib/errors";
 import { ResultView } from "@/features/result/ResultView";
 
 /**
@@ -52,27 +53,43 @@ export function JobStatusView({ jobId, onReset }: { jobId: string; onReset: () =
 
   const failed = data.status === "FAILED";
   const currentIdx = statusIndex(data.status);
+  const failure = failed ? classifyError(data.error_message) : null;
 
   return (
     <Panel onReset={onReset}>
       <div className="mb-6 flex items-center justify-between gap-4">
         <div>
           <h2 className="text-lg font-semibold">
-            {failed ? "Processing failed" : "Processing your meeting"}
+            {failure ? failure.title : "Processing your meeting"}
           </h2>
           <p className="mt-1 font-mono text-xs text-fg-muted">{jobId}</p>
         </div>
         <StatusPill tone={statusTone(data.status)}>{statusLabel(data.status)}</StatusPill>
       </div>
 
-      {failed ? (
-        <div className="rounded-lg bg-danger/10 p-4">
-          <p className="text-sm font-medium text-danger">
-            Failed at stage: {data.error_stage ?? "unknown"}
-          </p>
-          {data.error_message && (
-            <p className="mt-1 text-sm text-fg-muted">{data.error_message}</p>
+      {failure ? (
+        <div
+          className={cx(
+            "rounded-lg p-4",
+            failure.isRateLimit ? "bg-warning/10" : "bg-danger/10",
           )}
+        >
+          <p
+            className={cx(
+              "text-sm font-medium",
+              failure.isRateLimit ? "text-warning" : "text-danger",
+            )}
+          >
+            {failure.message}
+          </p>
+          {data.error_stage && !failure.isRateLimit && (
+            <p className="mt-1 text-xs text-fg-muted">
+              Failed at stage: {data.error_stage}
+            </p>
+          )}
+          <div className="mt-4">
+            <Button onClick={onReset}>Try again</Button>
+          </div>
         </div>
       ) : (
         <>

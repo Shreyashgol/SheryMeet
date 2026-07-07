@@ -74,18 +74,26 @@ class OpenAIProvider(LLMProvider):
                 ],
             )
         except openai.APITimeoutError as exc:
-            raise LLMTimeoutError("OpenAI request timed out", stage=StageName.SUMMARIZATION) from exc
+            raise LLMTimeoutError(
+                f"{self.name} request timed out", stage=StageName.SUMMARIZATION
+            ) from exc
         except openai.RateLimitError as exc:
-            raise LLMRateLimitError("OpenAI rate limited", stage=StageName.SUMMARIZATION) from exc
+            # Provider-accurate (Groq reuses this class) and detectable by the UI.
+            raise LLMRateLimitError(
+                f"The {self.name} API rate limit was reached (HTTP 429).",
+                stage=StageName.SUMMARIZATION,
+            ) from exc
         except openai.APIConnectionError as exc:
-            raise LLMServerError("OpenAI connection error", stage=StageName.SUMMARIZATION) from exc
+            raise LLMServerError(
+                f"{self.name} connection error", stage=StageName.SUMMARIZATION
+            ) from exc
         except openai.APIStatusError as exc:
             if exc.status_code >= 500:
                 raise LLMServerError(
-                    f"OpenAI server error {exc.status_code}", stage=StageName.SUMMARIZATION
+                    f"{self.name} server error {exc.status_code}", stage=StageName.SUMMARIZATION
                 ) from exc
             raise PermanentError(
-                f"OpenAI request rejected ({exc.status_code})", stage=StageName.SUMMARIZATION
+                f"{self.name} request rejected ({exc.status_code})", stage=StageName.SUMMARIZATION
             ) from exc
 
         text = (completion.choices[0].message.content or "").strip()

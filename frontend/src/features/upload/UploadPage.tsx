@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import { createJob } from "@/api/jobs";
 import { ApiError } from "@/api/client";
 import { Button, Card, cx } from "@/components/ui";
+import { classifyError } from "@/lib/errors";
 
 const ACCEPTED = [".wav", ".mp3"];
 const MAX_BYTES = 200 * 1024 * 1024;
@@ -60,6 +61,8 @@ export function UploadPage({
         ? "Upload failed. Please try again."
         : null;
 
+  const failure = serverError ? classifyError(serverError) : null;
+
   return (
     <div className="mx-auto max-w-2xl animate-fade-in">
       <div className="mb-8 text-center">
@@ -110,10 +113,21 @@ export function UploadPage({
           />
         </div>
 
-        {(clientError || serverError) && (
-          <p className="mt-4 rounded-lg bg-danger/10 px-3 py-2 text-sm text-danger" role="alert">
-            {clientError ?? serverError}
-          </p>
+        {(clientError || failure) && (
+          <div
+            className={cx(
+              "mt-4 rounded-lg p-4",
+              clientError || !failure?.isRateLimit ? "bg-danger/10 text-danger" : "bg-warning/10 text-warning",
+            )}
+            role="alert"
+          >
+            <p className="text-sm font-medium">
+              {clientError ?? failure?.message}
+            </p>
+            {failure && !clientError && failure.raw !== failure.message && (
+              <p className="mt-1 text-xs opacity-80">{failure.raw}</p>
+            )}
+          </div>
         )}
 
         <div className="mt-5 flex items-center justify-end gap-3">
