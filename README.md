@@ -1,324 +1,174 @@
-# SheryMeet - Meeting Intelligence Pipeline
+# SheryMeet: Meeting Intelligence Pipeline
 
-An asynchronous, production-oriented pipeline that turns a meeting recording
-(`.wav` / `.mp3`) into a **structured meeting summary** and an **accountable
-checklist** of action items.
-
-## Live demo
-
-- **Web app (Vercel):** https://shery-meet.vercel.app/
-- **API docs (Render):** https://sherymeet.onrender.com/docs
-
-> Hosted on free tiers — the backend sleeps after ~15 min of inactivity, so the
-> first request may take up to a minute to cold-start.
+An asynchronous, production-oriented pipeline that processes raw meeting recordings (`.wav` / `.mp3`) into structured summaries and accountable action-item checklists using Whisper ASR and LLMs.
 
 ---
 
-## Table of contents
-
-- [Problem](#problem)
-- [Proposed solution](#proposed-solution)
-- [System architecture](#system-architecture)
-- [Tech stack](#tech-stack)
-- [Local setup](#local-setup)
-- [Future implementation](#future-implementation)
-- [Conclusion](#conclusion)
+## ⚡️ Key Links & Live Demo
+* **Web Client (Vercel)**: [shery-meet.vercel.app](https://shery-meet.vercel.app/)
+* **API Docs (Render)**: [sherymeet.onrender.com/docs](https://sherymeet.onrender.com/docs)
+> [!NOTE]
+> Hosted on free-tier services. The backend sleeps after 15 minutes of inactivity; the initial request may take up to 60 seconds to cold-start.
 
 ---
 
-## Problem
+## 🏗️ System Architecture & Runtime Flow
 
-Meetings are where decisions get made — and where they get lost. A one-hour
-recording is a wall of unstructured audio: nobody wants to re-listen to it, the
-action items slip through the cracks, and "who agreed to do what, by when"
-evaporates the moment the call ends.
+### Ports & Adapters (Hexagonal Design)
+The backend is structured using clean architecture, where business logic is isolated and external services (ASR, LLM, Object Storage) are injected via interfaces (ports).
 
-Writing up notes by hand is slow, inconsistent, and the first thing people skip
-when they're busy. The result is a pile of recordings nobody revisits and
-follow-ups nobody owns. What teams actually need from a meeting isn't the
-recording — it's **a summary they can share and a checklist someone is
-accountable for.**
+```
+┌──────────────────────────────────────────────────────────────┐
+│  WEB TIER: React + TS + Vite + Tailwind (Nginx)              │
+│  Uploads raw audio, polls job state, and renders results.     │
+└───────────────────────────┬──────────────────────────────────┘
+                            │ REST/JSON (CORS-scoped /api proxy)
+                            ▼
+┌──────────────────────────────────────────────────────────────┐
+│  API TIER: FastAPI (Thin Gateway)                            │
+│  Validates payloads, creates job metadata, enqueues pipeline. │
+└───────────────┬────────────────────────────────┬─────────────┘
+                │ Enqueue                          │ Reads / Writes
+                ▼                                  ▼
+     ┌────────────────────┐            ┌────────────────────────┐
+     │   Redis (Broker)   │            │ PostgreSQL (Neon)      │
+     │  Task orchestration│            │ Single source of truth │
+     └─────────┬──────────┘            │ for jobs and outputs   │
+               │ Celery Chain          └────────────────────────┘
+               ▼
+┌──────────────────────────────────────────────────────────────┐
+│  WORKER TIER: Distributed Celery Workers (4 queues)           │
+│   • audio.q      ➔ ffprobe validation & Whisper ASR           │
+│   • transcript.q ➔ clean, filler removal & formatting         │
+│   • summary.q    ➔ LLM structured summary generation          │
+│   • checklist.q  ➔ LLM action-item extraction                 │
+└───────────────────────────┬──────────────────────────────────┘
+                            │ Outward-facing adapters
+                            ▼
+      ASRProvider   ➔ local_whisper | openai_whisper | mock
+      LLMProvider   ➔ claude | openai | gemini | mock
+      ObjectStorage ➔ local_fs (S3-compatible API)
+```
+
+### Runtime Pipeline Lifecycle
+```
+QUEUED ──▶ VALIDATING ──▶ TRANSCRIBING ──▶ CLEANING ──▶ SUMMARIZING ──▶ EXTRACTING_ACTIONS ──▶ COMPLETED
+                                    └─────────────────── (Any Stage Failure) ───────────▶ FAILED
+```
+* **Idempotency**: Celery tasks pass only the `job_id`. Workers fetch inputs and store outputs directly using PostgreSQL/storage.
+* **Eager Mode Fallback**: If Celery/Redis are unavailable (e.g., local development or single-node free tiers), setting `CELERY_TASK_ALWAYS_EAGER=true` processes the pipeline synchronously in a background thread without broker dependencies.
 
 ---
 
-## Proposed solution
+## 🛠️ Tech Stack & Key Architectural Decisions
+- **FastAPI**: Non-blocking asynchronous web frame with automatic OpenAPI document generation.
+- **Celery & Redis**: Decoupled, multi-queue task processing allows computational scaling for heavy workloads (ASR/LLM) independent of the API gateway.
+- **PostgreSQL (Neon)**: The single source of truth. Unlike standard Celery systems, all job states, execution logs, and output models are written to a relational DB to enable structured historical queries.
+- **Strict JSON Enforcement**: Instructs LLMs to return strict JSON matching Pydantic schemas, backed by local AST-based JSON healing and a bounded single reprompt strategy on validation failures.
 
-SheryMeet turns a raw meeting recording into two things a team can act on:
+---
 
-1. **A structured summary** — meeting title, overview, agenda, key decisions,
-   risks, blockers, and next steps.
-2. **An accountable checklist** — action items where every row has an owner, a
-   task, a deadline, a priority, and a status.
+## 💾 Relational Database Schema (3NF)
 
-Upload audio → it is transcribed by an ASR model, the transcript is cleaned, and
-an LLM produces **schema-validated JSON** → you get a shareable summary and a
-checklist where nothing is left unattributed. The whole flow runs
-**asynchronously**, so large recordings process in the background while the UI
-shows live progress.
+| Table | Cardinality | Key Fields & Purpose |
+| :--- | :--- | :--- |
+| **`jobs`** | *Aggregate Root* | Status, progress %, file paths, runtime errors, and execution timestamps. |
+| **`transcripts`** | `1:1` with `jobs` | Diarization-ready `raw_text`, `cleaned_text`, and parsed `segments` (JSONB). |
+| **`summaries`** | `1:1` with `jobs` | `meeting_title`, `summary`, and structured arrays (`agenda`, `key_decisions`, `risks`, `blockers`). |
+| **`action_items`** | `N:1` with `jobs` | Relational list of action items detailing `owner`, `task`, `deadline`, `priority`, and `status`. |
+| **`processing_logs`**| `N:1` with `jobs` | Append-only execution audit trail tracking per-stage latency (`latency_ms`). |
 
-Every action item is guaranteed complete: unknown owner → `"Unknown"`, absent
-deadline → `"Not Specified"`, status → `"Pending"`.
+---
 
-### API surface
+## 🔌 API Reference Highlights
+Base Path: `/api/v1`
 
-Base path: `/api/v1`. Interactive docs at `/docs` (Swagger) and `/redoc`.
+| Method | Path | Request Body | Success Response | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| **`POST`** | `/jobs` | `multipart/form-data` | `201 { job_id, status }` | Uploads meeting recording (`.mp3` / `.wav`) |
+| **`GET`** | `/jobs/{id}` | *None* | `200 { job_id, status, progress, ... }` | Polls current progress status and stage logs |
+| **`GET`** | `/jobs/{id}/result`| *None* | `200 { summary, checklist, metadata }` | Returns fully processed summary and action items |
+| **`GET`** | `/health` / `/ready` | *None* | `200` | Checks service, DB, and Redis broker availability |
 
-| Method | Path | Body | Success | Errors |
-|---|---|---|---|---|
-| `POST` | `/jobs` | multipart `file` (wav/mp3) | `201 { job_id, status }` | 400 unsupported/empty · 503 broker down |
-| `GET` | `/jobs/{id}` | — | `200 { job_id, status, progress, timestamps, error_stage?, error_message? }` | 404 |
-| `GET` | `/jobs/{id}/result` | — | `200 { job_id, summary, checklist, metadata }` | 404 · 409 not ready |
-| `GET` | `/health` · `/ready` | — | `200` (ready checks DB + broker) | 503 |
-
-Errors use a consistent envelope: `{ "error": { "code", "message", "detail?" } }`.
-
-**Result shape:**
-
-```jsonc
+### Standard Error Response Envelope
+```json
 {
-  "job_id": "…",
-  "summary": {
-    "meeting_title": "Q3 Roadmap Finalization",
-    "summary": "…",
-    "agenda": ["…"], "key_decisions": ["…"],
-    "risks": ["…"], "blockers": [], "next_steps": ["…"]
-  },
-  "checklist": [
-    { "id": "…", "owner": "John", "task": "Complete the API migration",
-      "deadline": "next Friday", "priority": "High", "status": "Pending" }
-  ],
-  "metadata": {
-    "audio_format": "wav", "duration_seconds": 612.0, "language": "en",
-    "llm_provider": "claude", "llm_model": "claude-opus-4-8",
-    "latencies_ms": { "VALIDATION": 4200, "CLEANING": 12, "SUMMARIZATION": 1800, "CHECKLIST": 1500 },
-    "total_pipeline_ms": 7600
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Unsupported file format.",
+    "detail": { "allowed": ["wav", "mp3"] }
   }
 }
 ```
 
-### Job states
-
-```
-QUEUED → VALIDATING → TRANSCRIBING → CLEANING → SUMMARIZING → EXTRACTING_ACTIONS → COMPLETED
-                                              └──────────────── FAILED (any stage) ┘
-```
-
-`progress` is derived from status (0 → 100), so the API and workers never drift.
-The client polls `GET /jobs/{id}` for status/progress, then `GET /jobs/{id}/result`.
-
 ---
 
-## System architecture
+## 🚀 Local Quickstart
 
-Clean architecture with dependencies pointing inward (API → services → domain;
-infrastructure injected). Volatile third-party SDKs (ASR, LLM, storage) sit behind
-ports so they are swappable via configuration without touching business code.
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│  WEB TIER — React + TS + Vite + Tailwind (nginx)               │
-│  Upload · live job progress (polling) · result viewer          │
-│  Dark / Light / System theme via CSS-variable design tokens    │
-└───────────────────────────┬──────────────────────────────────┘
-                            │ REST/JSON (CORS-scoped, /api proxy)
-                            ▼
-┌──────────────────────────────────────────────────────────────┐
-│  API TIER — FastAPI (thin; no business logic)                  │
-│  validate upload → create job → store file → enqueue chain     │
-└───────────────┬────────────────────────────────┬─────────────┘
-                │ enqueue                          │ read
-                ▼                                  ▼
-     ┌────────────────────┐            ┌────────────────────────┐
-     │  Redis (broker)    │            │  PostgreSQL (job state, │
-     │  per-queue routing │            │  transcripts, summaries,│
-     └─────────┬──────────┘            │  actions, logs/metrics) │
-               │ Celery chain          └────────────────────────┘
-               ▼
-┌──────────────────────────────────────────────────────────────┐
-│  WORKER TIER — 4 single-responsibility workers, one per queue  │
-│   audio.q      → validate + normalize + Whisper ASR            │
-│   transcript.q → clean / normalize transcript                 │
-│   summary.q    → LLM structured summary                        │
-│   checklist.q  → LLM action-item extraction                    │
-└───────────────────────────┬──────────────────────────────────┘
-                            │ uses (ports & adapters)
-                            ▼
-   ASRProvider  → local_whisper | openai_whisper | mock
-   LLMProvider  → claude | openai | gemini | mock
-   ObjectStorage → local_fs (S3-ready)
-```
-
-**Why Postgres is the source of truth:** Celery result state is transient. A
-business pipeline needs durable, queryable job state, so every stage transition
-and metric is written to Postgres; Redis/Celery are orchestration only.
-
-> **Deployment note (free tier):** with no Redis/worker available (e.g. Render
-> free tier, `CELERY_TASK_ALWAYS_EAGER=true`), the dispatcher runs the four
-> stages sequentially in-process on a background thread instead of a broker-backed
-> chain — so the API still returns immediately and reports progress as each stage
-> completes.
-
-### Runtime flow
-
-```
-Client ─POST /jobs─▶ API: validate ext+size → store file → INSERT job(QUEUED)
-                     → enqueue chain(audio → transcript → summary → checklist)
-                     ◀─ { job_id, status: QUEUED }
-
-Audio Worker      VALIDATING → deep validate (magic bytes + ffprobe) →
-                  TRANSCRIBING → ffmpeg normalize → Whisper ASR → INSERT transcript
-Transcript Worker CLEANING → filler removal / spacing / punctuation → UPDATE transcript
-Summary Worker    SUMMARIZING → LLM (schema-validated JSON) → INSERT summary
-Checklist Worker  EXTRACTING_ACTIONS → LLM action items → INSERT action_items → COMPLETED
-
-Each stage writes ProcessingLogs (event, latency_ms). Any unrecoverable error →
-FAILED (with error_stage + message); the chain aborts.
-
-Client polls GET /jobs/{id} for status/progress, then GET /jobs/{id}/result.
-```
-
-Only the `job_id` flows between tasks; each worker re-reads its input from
-Postgres/storage, which makes tasks **idempotent and retry-safe**.
-
-### Folder structure
-
-```
-meeting-summarizer/
-├── backend/
-│   ├── app/
-│   │   ├── api/            # FastAPI routes + DI (thin HTTP layer)
-│   │   ├── core/           # enums, exceptions, logging, metrics
-│   │   ├── config/         # Pydantic settings (env-driven)
-│   │   ├── workers/        # celery_app, dispatch, 4 stage workers, base
-│   │   ├── database/       # base/mixins, session, Alembic migrations
-│   │   ├── models/         # SQLAlchemy ORM (one file per table)
-│   │   ├── schemas/        # Pydantic DTOs + LLM I/O contracts
-│   │   ├── repositories/   # data access (only place touching the ORM)
-│   │   ├── services/       # business logic (job, audio, transcription, …)
-│   │   ├── providers/      # ports & adapters: asr/*, llm/*
-│   │   ├── prompts/        # summary_prompt.py, checklist_prompt.py
-│   │   ├── storage/        # ObjectStorage port + local adapter
-│   │   └── utils/          # audio, json_repair, retry
-│   ├── tests/              # unit · integration · pipeline (+ fixtures)
-│   ├── docker/             # Dockerfile, entrypoint-api.sh, entrypoint-worker.sh
-│   ├── alembic.ini · pyproject.toml · .env.example
-├── frontend/               # React SPA (see frontend/README on build)
-│   ├── src/ · index.html · vite/tailwind/ts config
-│   └── docker/             # Dockerfile (vite build → nginx) + nginx.conf
-├── docker-compose.yml      # postgres · redis · migrate · api · 4 workers · frontend
-├── .env.example
-└── README.md
-```
-
-### Database schema
-
-Normalized (3NF). Every table carries a UUID primary key and `created_at` /
-`updated_at`; `jobs` also tracks `status`, `progress`, and lifecycle timestamps.
-
-| Table | Cardinality | Purpose |
-|---|---|---|
-| `jobs` | aggregate root | status/progress, audio metadata, error attribution, lifecycle timestamps |
-| `transcripts` | 1:1 with job | `raw_text`, `cleaned_text`, `language`, `segments` (JSONB, diarization-ready) |
-| `summaries` | 1:1 with job | title/summary + `agenda`/`key_decisions`/`risks`/`blockers`/`next_steps` (JSONB), provenance |
-| `action_items` | N:1 with job/summary | owner/task/deadline/priority/status (non-null defaults enforce completeness) |
-| `processing_logs` | N:1 with job | append-only audit trail + `latency_ms` (metrics store) |
-
-Enums are native Postgres types (`job_status`, `stage_name`, `priority`,
-`action_item_status`, `log_level`). Metrics (queue-wait, ASR/LLM latency, total
-pipeline latency) are derived from `processing_logs.latency_ms` + job timestamps.
-
----
-
-## Tech stack
-
-- **Backend:** FastAPI · Celery · Redis · PostgreSQL · SQLAlchemy · Pydantic · Alembic
-- **AI:** Whisper (local `faster-whisper` or OpenAI API) · Claude / OpenAI / Gemini (pluggable)
-- **Frontend:** React · TypeScript · Vite · Tailwind · TanStack Query
-- **Ops:** Docker · Docker Compose · structured logging · per-stage metrics
-- **Deploy:** Vercel (SPA) · Render (Docker API, free tier) · Neon (serverless Postgres)
-
----
-
-## Local setup
-
-### Configuration / environment variables
-
-All configuration is environment-driven; no secrets are hardcoded. Config lives
-in **two files**: `backend/.env` (API, DB, providers, keys) and `frontend/.env`
-(SPA API base URL). The database is **Neon** (serverless Postgres) — set its
-connection string in `backend/.env`; there is no local Postgres container.
-
-| Variable (file) | Default | Notes |
-|---|---|---|
-| `DATABASE_URL` (backend) | — | **Neon** DSN: `postgresql+psycopg2://user:pass@host/db?sslmode=require` (pooled host recommended). A bare `postgresql://` scheme is auto-corrected. |
-| `VITE_API_URL` (frontend) | `/api/v1` | API base; `/api/v1` works behind the nginx/dev proxy |
-| `REDIS_URL` | `redis://redis:6379/0` | Celery broker + result backend |
-| `ASR_PROVIDER` | `local_whisper` | `local_whisper` \| `openai_whisper` \| `mock` |
-| `ASR_MODEL` | `base` | faster-whisper model size |
-| `LLM_PROVIDER` | `claude` | `claude` \| `openai` \| `gemini` \| `mock` |
-| `LLM_MODEL` | `claude-opus-4-8` | model id for the selected provider |
-| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` | — | required for the matching provider |
-| `MAX_UPLOAD_BYTES` | `209715200` | 200 MB upload cap |
-| `CORS_ALLOW_ORIGINS` | `http://localhost:8080` | comma-separated allowlist |
-| `RETRY_MAX_ATTEMPTS` | `3` | transient-failure retry budget |
-
-> **Fully offline:** set `ASR_PROVIDER=mock` and `LLM_PROVIDER=mock` to run the
-> entire pipeline with no models or API keys — used by the test suite.
-
-### Running with Docker
-
+### Environment Configuration
+Copy env templates and customize:
 ```bash
-cp backend/.env.example backend/.env    # set DATABASE_URL (Neon) + provider key
-cp frontend/.env.example frontend/.env  # default VITE_API_URL is fine
+cp backend/.env.example backend/.env
+cp frontend/.env.example frontend/.env
+```
 
+| Key Environment Variable | Description / Valid Values |
+| :--- | :--- |
+| **`DATABASE_URL`** | Neon Connection DSN (using `postgresql+psycopg2://` driver) |
+| **`REDIS_URL`** | Celery broker URI (e.g. `redis://localhost:6379/0`) |
+| **`ASR_PROVIDER`** | `local_whisper` (requires local C++ runtime) \| `openai_whisper` \| `mock` |
+| **`LLM_PROVIDER`** | `claude` (Anthropic) \| `openai` \| `gemini` \| `mock` |
+| **`API_KEY` Variables**| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY` |
+
+> [!TIP]
+> **Fully Offline Development**: Set `ASR_PROVIDER=mock` and `LLM_PROVIDER=mock` to run the entire backend pipeline locally without external API dependencies.
+
+---
+
+### Option A: Run via Docker Compose (Recommended)
+This spins up the Redis broker, API server, 4 separate worker services, and the React frontend:
+```bash
 docker compose up --build
 ```
+* **Frontend Access**: `http://localhost:8080`
+* **Swagger API Documentation**: `http://localhost:8000/docs`
 
-Then open:
+---
 
-- Frontend UI: <http://localhost:8080>
-- API docs: <http://localhost:8000/docs>
+### Option B: Local Run (No Docker)
 
-Compose starts `redis`, a one-shot `migrate` (Alembic → Neon), the `api`, four
-per-queue workers, and the `frontend`. The database is Neon (external), so no
-Postgres container runs. Scale a stage independently, e.g.:
-
-```bash
-docker compose up --scale worker-summary=3
-```
-
-### Running locally (without Docker)
-
-Requires Python 3.11+, `ffmpeg`, and running Postgres + Redis.
-
+#### 1. Setup Backend
+Ensure Python 3.11+ and `ffmpeg` are installed locally.
 ```bash
 cd backend
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[llm,dev]"          # hosted providers (Groq/OpenAI/Claude/Gemini)
-# pip install -e ".[llm,dev,local-asr]"   # add offline ASR (ASR_PROVIDER=local_whisper)
+pip install -e ".[llm,dev]" # For hosted ASR/LLMs
+# pip install -e ".[llm,dev,local-asr]" # Optional: installs faster-whisper locally
 
-export DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/meetings
-export REDIS_URL=redis://localhost:6379/0
-export LLM_PROVIDER=mock ASR_PROVIDER=mock   # or set real provider + API key
-
+# Apply migrations and launch local dev server
 alembic upgrade head
-uvicorn app.main:app --reload                        # API on :8000
-
-# In separate shells — one worker per queue:
-celery -A app.workers.celery_app.celery_app worker -Q audio.q      -c 1
-celery -A app.workers.celery_app.celery_app worker -Q transcript.q -c 2
-celery -A app.workers.celery_app.celery_app worker -Q summary.q    -c 2
-celery -A app.workers.celery_app.celery_app worker -Q checklist.q  -c 2
+uvicorn app.main:app --reload
 ```
 
-Frontend:
-
+#### 2. Start Celery Workers (Separate terminals)
 ```bash
-cd frontend && npm install && npm run dev   # Vite dev server on :5173
+celery -A app.workers.celery_app.celery_app worker -Q audio.q -c 1
+celery -A app.workers.celery_app.celery_app worker -Q transcript.q -c 2
+celery -A app.workers.celery_app.celery_app worker -Q summary.q -c 2
+celery -A app.workers.celery_app.celery_app worker -Q checklist.q -c 2
 ```
 
-### Testing
+#### 3. Setup Frontend
+```bash
+cd frontend
+npm install
+npm run dev
+```
 
+---
+
+## 🧪 Testing Suite
+The suite tests components in isolation and performs E2E pipeline processing in Celery eager mode using Mock services:
 ```bash
 cd backend
 export DATABASE_URL=… REDIS_URL=…        # a reachable Postgres (integration/pipeline)
@@ -356,3 +206,20 @@ Designed to be extended without modifying existing modules:
 SheryMeet is a small but complete, production-oriented system: it takes a messy
 real-world input (an audio recording) and returns something a team can actually
 use (a shareable summary and an owned checklist), end to end, asynchronously.
+
+A few deliberate design decisions hold it together:
+
+- **Ports & adapters** for ASR/LLM/storage → swap Whisper local↔API and
+  Claude↔OpenAI↔Gemini by config (Open/Closed, Dependency Inversion).
+- **Per-queue workers** enforce single responsibility at the infrastructure
+  level and let expensive stages (ASR, LLM) scale independently.
+- **Typed error hierarchy** (`TransientError` vs `PermanentError`) drives retry
+  decisions without string-matching; transient failures retry with backoff,
+  permanent failures fail fast and abort the chain.
+- **Same Pydantic schema** instructs the LLM (embedded JSON schema) and validates
+  its response; invalid JSON gets a tolerant repair + one bounded reprompt.
+- **Structured logging** (structlog) with `job_id` bound across API and workers.
+
+The result is a codebase that reads as a reference for structuring an async AI
+pipeline — durable job state, clean boundaries, and swappable models — and one
+that is straightforward to extend along the directions above.
