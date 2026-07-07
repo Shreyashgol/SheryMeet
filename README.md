@@ -7,8 +7,6 @@ An asynchronous, production-oriented pipeline that processes raw meeting recordi
 ## ⚡️ Key Links & Live Demo
 * **Web Client (Vercel)**: [shery-meet.vercel.app](https://shery-meet.vercel.app/)
 * **API Docs (Render)**: [sherymeet.onrender.com/docs](https://sherymeet.onrender.com/docs)
-> [!NOTE]
-> Hosted on free-tier services. The backend sleeps after 15 minutes of inactivity; the initial request may take up to 60 seconds to cold-start.
 
 ---
 
