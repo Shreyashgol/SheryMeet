@@ -18,7 +18,9 @@ router = APIRouter(tags=["health"])
 log = get_logger(__name__)
 
 
-@router.get("/health", summary="Liveness probe")
+# Accept HEAD as well as GET so uptime monitors (UptimeRobot defaults to HEAD)
+# don't get a 405 when pinging the liveness probe.
+@router.api_route("/health", methods=["GET", "HEAD"], summary="Liveness probe")
 def health() -> dict[str, str]:
     """Return 200 while the process is alive. No dependency checks."""
     return {"status": "ok"}
