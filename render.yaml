@@ -45,4 +45,4 @@ services:
       - key: LOG_JSON
         value: "true"
       - key: CORS_ALLOW_ORIGINS
-        value: https://sherymeet.vercel.app   # <-- set to your Vercel domain (no trailing slash)
+        value: https://shery-meet.vercel.app   # <-- set to your Vercel domain (exact, no trailing slash)

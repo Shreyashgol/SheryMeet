@@ -20,7 +20,11 @@ function humanSize(bytes: number): string {
 }
 
 /** Upload screen: drag-and-drop (or pick) a meeting recording and start a job. */
-export function UploadPage({ onCreated }: { onCreated: (jobId: string) => void }) {
+export function UploadPage({
+  onCreated,
+}: {
+  onCreated: (jobId: string, filename: string) => void;
+}) {
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const [clientError, setClientError] = useState<string | null>(null);
@@ -28,7 +32,7 @@ export function UploadPage({ onCreated }: { onCreated: (jobId: string) => void }
 
   const mutation = useMutation({
     mutationFn: createJob,
-    onSuccess: (data) => onCreated(data.job_id),
+    onSuccess: (data, uploaded) => onCreated(data.job_id, uploaded.name),
   });
 
   const select = (f: File | null) => {

@@ -1,8 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
+import { useEffect } from "react";
 
 import { getJobResult } from "@/api/jobs";
 import type { JobResult } from "@/api/jobs";
 import { Button, Card, EmptyList, PriorityBadge, StatusPill } from "@/components/ui";
+import { updateJob } from "@/lib/history";
 
 /** Renders the completed meeting result: summary sections + accountable checklist. */
 export function ResultView({ jobId, onReset }: { jobId: string; onReset: () => void }) {
@@ -10,6 +12,13 @@ export function ResultView({ jobId, onReset }: { jobId: string; onReset: () => v
     queryKey: ["result", jobId],
     queryFn: () => getJobResult(jobId),
   });
+
+  // Replace the placeholder (filename) with the AI-generated meeting title in
+  // this device's history once the result is available.
+  const meetingTitle = data?.summary.meeting_title;
+  useEffect(() => {
+    if (meetingTitle) updateJob(jobId, { title: meetingTitle, status: "COMPLETED" });
+  }, [jobId, meetingTitle]);
 
   if (error) {
     return (

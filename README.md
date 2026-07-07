@@ -4,36 +4,111 @@ An asynchronous, production-oriented pipeline that turns a meeting recording
 (`.wav` / `.mp3`) into a **structured meeting summary** and an **accountable
 checklist** of action items.
 
-Audio is transcribed with an ASR model, the transcript is cleaned, and an LLM
-produces schema-validated JSON. The whole flow runs asynchronously across
-dedicated Celery workers, with PostgreSQL as the durable source of truth for job
-state and a React SPA (dark/light) for uploading and viewing results.
+## Live demo
 
-- **Backend:** FastAPI · Celery · Redis · PostgreSQL · SQLAlchemy · Pydantic · Alembic
-- **AI:** Whisper (local `faster-whisper` or OpenAI API) · Claude / OpenAI / Gemini (pluggable)
-- **Frontend:** React · TypeScript · Vite · Tailwind · TanStack Query
-- **Ops:** Docker · Docker Compose · structured logging · per-stage metrics
+- **Web app (Vercel):** https://shery-meet.vercel.app/
+- **API docs (Render):** https://sherymeet.onrender.com/docs
+
+> Hosted on free tiers — the backend sleeps after ~15 min of inactivity, so the
+> first request may take up to a minute to cold-start.
 
 ---
 
 ## Table of contents
 
-- [Architecture](#architecture)
-- [Runtime flow](#runtime-flow)
-- [Folder structure](#folder-structure)
-- [Database schema](#database-schema)
-- [API documentation](#api-documentation)
-- [Job states](#job-states)
-- [Configuration / environment variables](#configuration--environment-variables)
-- [Running with Docker](#running-with-docker)
-- [Running locally (without Docker)](#running-locally-without-docker)
-- [Testing](#testing)
-- [Design decisions](#design-decisions)
-- [Future improvements](#future-improvements)
+- [Problem](#problem)
+- [Proposed solution](#proposed-solution)
+- [System architecture](#system-architecture)
+- [Tech stack](#tech-stack)
+- [Local setup](#local-setup)
+- [Future implementation](#future-implementation)
+- [Conclusion](#conclusion)
 
 ---
 
-## Architecture
+## Problem
+
+Meetings are where decisions get made — and where they get lost. A one-hour
+recording is a wall of unstructured audio: nobody wants to re-listen to it, the
+action items slip through the cracks, and "who agreed to do what, by when"
+evaporates the moment the call ends.
+
+Writing up notes by hand is slow, inconsistent, and the first thing people skip
+when they're busy. The result is a pile of recordings nobody revisits and
+follow-ups nobody owns. What teams actually need from a meeting isn't the
+recording — it's **a summary they can share and a checklist someone is
+accountable for.**
+
+---
+
+## Proposed solution
+
+SheryMeet turns a raw meeting recording into two things a team can act on:
+
+1. **A structured summary** — meeting title, overview, agenda, key decisions,
+   risks, blockers, and next steps.
+2. **An accountable checklist** — action items where every row has an owner, a
+   task, a deadline, a priority, and a status.
+
+Upload audio → it is transcribed by an ASR model, the transcript is cleaned, and
+an LLM produces **schema-validated JSON** → you get a shareable summary and a
+checklist where nothing is left unattributed. The whole flow runs
+**asynchronously**, so large recordings process in the background while the UI
+shows live progress.
+
+Every action item is guaranteed complete: unknown owner → `"Unknown"`, absent
+deadline → `"Not Specified"`, status → `"Pending"`.
+
+### API surface
+
+Base path: `/api/v1`. Interactive docs at `/docs` (Swagger) and `/redoc`.
+
+| Method | Path | Body | Success | Errors |
+|---|---|---|---|---|
+| `POST` | `/jobs` | multipart `file` (wav/mp3) | `201 { job_id, status }` | 400 unsupported/empty · 503 broker down |
+| `GET` | `/jobs/{id}` | — | `200 { job_id, status, progress, timestamps, error_stage?, error_message? }` | 404 |
+| `GET` | `/jobs/{id}/result` | — | `200 { job_id, summary, checklist, metadata }` | 404 · 409 not ready |
+| `GET` | `/health` · `/ready` | — | `200` (ready checks DB + broker) | 503 |
+
+Errors use a consistent envelope: `{ "error": { "code", "message", "detail?" } }`.
+
+**Result shape:**
+
+```jsonc
+{
+  "job_id": "…",
+  "summary": {
+    "meeting_title": "Q3 Roadmap Finalization",
+    "summary": "…",
+    "agenda": ["…"], "key_decisions": ["…"],
+    "risks": ["…"], "blockers": [], "next_steps": ["…"]
+  },
+  "checklist": [
+    { "id": "…", "owner": "John", "task": "Complete the API migration",
+      "deadline": "next Friday", "priority": "High", "status": "Pending" }
+  ],
+  "metadata": {
+    "audio_format": "wav", "duration_seconds": 612.0, "language": "en",
+    "llm_provider": "claude", "llm_model": "claude-opus-4-8",
+    "latencies_ms": { "VALIDATION": 4200, "CLEANING": 12, "SUMMARIZATION": 1800, "CHECKLIST": 1500 },
+    "total_pipeline_ms": 7600
+  }
+}
+```
+
+### Job states
+
+```
+QUEUED → VALIDATING → TRANSCRIBING → CLEANING → SUMMARIZING → EXTRACTING_ACTIONS → COMPLETED
+                                              └──────────────── FAILED (any stage) ┘
+```
+
+`progress` is derived from status (0 → 100), so the API and workers never drift.
+The client polls `GET /jobs/{id}` for status/progress, then `GET /jobs/{id}/result`.
+
+---
+
+## System architecture
 
 Clean architecture with dependencies pointing inward (API → services → domain;
 infrastructure injected). Volatile third-party SDKs (ASR, LLM, storage) sit behind
@@ -77,7 +152,13 @@ ports so they are swappable via configuration without touching business code.
 business pipeline needs durable, queryable job state, so every stage transition
 and metric is written to Postgres; Redis/Celery are orchestration only.
 
-## Runtime flow
+> **Deployment note (free tier):** with no Redis/worker available (e.g. Render
+> free tier, `CELERY_TASK_ALWAYS_EAGER=true`), the dispatcher runs the four
+> stages sequentially in-process on a background thread instead of a broker-backed
+> chain — so the API still returns immediately and reports progress as each stage
+> completes.
+
+### Runtime flow
 
 ```
 Client ─POST /jobs─▶ API: validate ext+size → store file → INSERT job(QUEUED)
@@ -99,7 +180,7 @@ Client polls GET /jobs/{id} for status/progress, then GET /jobs/{id}/result.
 Only the `job_id` flows between tasks; each worker re-reads its input from
 Postgres/storage, which makes tasks **idempotent and retry-safe**.
 
-## Folder structure
+### Folder structure
 
 ```
 meeting-summarizer/
@@ -129,7 +210,7 @@ meeting-summarizer/
 └── README.md
 ```
 
-## Database schema
+### Database schema
 
 Normalized (3NF). Every table carries a UUID primary key and `created_at` /
 `updated_at`; `jobs` also tracks `status`, `progress`, and lifecycle timestamps.
@@ -146,56 +227,21 @@ Enums are native Postgres types (`job_status`, `stage_name`, `priority`,
 `action_item_status`, `log_level`). Metrics (queue-wait, ASR/LLM latency, total
 pipeline latency) are derived from `processing_logs.latency_ms` + job timestamps.
 
-## API documentation
+---
 
-Base path: `/api/v1`. Interactive docs at `/docs` (Swagger) and `/redoc`.
+## Tech stack
 
-| Method | Path | Body | Success | Errors |
-|---|---|---|---|---|
-| `POST` | `/jobs` | multipart `file` (wav/mp3) | `201 { job_id, status }` | 400 unsupported/empty · 503 broker down |
-| `GET` | `/jobs/{id}` | — | `200 { job_id, status, progress, timestamps, error_stage?, error_message? }` | 404 |
-| `GET` | `/jobs/{id}/result` | — | `200 { job_id, summary, checklist, metadata }` | 404 · 409 not ready |
-| `GET` | `/health` · `/ready` | — | `200` (ready checks DB + broker) | 503 |
+- **Backend:** FastAPI · Celery · Redis · PostgreSQL · SQLAlchemy · Pydantic · Alembic
+- **AI:** Whisper (local `faster-whisper` or OpenAI API) · Claude / OpenAI / Gemini (pluggable)
+- **Frontend:** React · TypeScript · Vite · Tailwind · TanStack Query
+- **Ops:** Docker · Docker Compose · structured logging · per-stage metrics
+- **Deploy:** Vercel (SPA) · Render (Docker API, free tier) · Neon (serverless Postgres)
 
-Errors use a consistent envelope: `{ "error": { "code", "message", "detail?" } }`.
+---
 
-**Result shape:**
+## Local setup
 
-```jsonc
-{
-  "job_id": "…",
-  "summary": {
-    "meeting_title": "Q3 Roadmap Finalization",
-    "summary": "…",
-    "agenda": ["…"], "key_decisions": ["…"],
-    "risks": ["…"], "blockers": [], "next_steps": ["…"]
-  },
-  "checklist": [
-    { "id": "…", "owner": "John", "task": "Complete the API migration",
-      "deadline": "next Friday", "priority": "High", "status": "Pending" }
-  ],
-  "metadata": {
-    "audio_format": "wav", "duration_seconds": 612.0, "language": "en",
-    "llm_provider": "claude", "llm_model": "claude-opus-4-8",
-    "latencies_ms": { "VALIDATION": 4200, "CLEANING": 12, "SUMMARIZATION": 1800, "CHECKLIST": 1500 },
-    "total_pipeline_ms": 7600
-  }
-}
-```
-
-Every action item is guaranteed complete: unknown owner → `"Unknown"`, absent
-deadline → `"Not Specified"`, status → `"Pending"`.
-
-## Job states
-
-```
-QUEUED → VALIDATING → TRANSCRIBING → CLEANING → SUMMARIZING → EXTRACTING_ACTIONS → COMPLETED
-                                              └──────────────── FAILED (any stage) ┘
-```
-
-`progress` is derived from status (0 → 100), so the API and workers never drift.
-
-## Configuration / environment variables
+### Configuration / environment variables
 
 All configuration is environment-driven; no secrets are hardcoded. Config lives
 in **two files**: `backend/.env` (API, DB, providers, keys) and `frontend/.env`
@@ -219,7 +265,7 @@ connection string in `backend/.env`; there is no local Postgres container.
 > **Fully offline:** set `ASR_PROVIDER=mock` and `LLM_PROVIDER=mock` to run the
 > entire pipeline with no models or API keys — used by the test suite.
 
-## Running with Docker
+### Running with Docker
 
 ```bash
 cp backend/.env.example backend/.env    # set DATABASE_URL (Neon) + provider key
@@ -241,7 +287,7 @@ Postgres container runs. Scale a stage independently, e.g.:
 docker compose up --scale worker-summary=3
 ```
 
-## Running locally (without Docker)
+### Running locally (without Docker)
 
 Requires Python 3.11+, `ffmpeg`, and running Postgres + Redis.
 
@@ -271,7 +317,7 @@ Frontend:
 cd frontend && npm install && npm run dev   # Vite dev server on :5173
 ```
 
-## Testing
+### Testing
 
 ```bash
 cd backend
@@ -286,20 +332,9 @@ pytest                                    # unit + integration + pipeline
 
 Integration/pipeline tests self-skip when no database is reachable.
 
-## Design decisions
+---
 
-- **Ports & adapters** for ASR/LLM/storage → swap Whisper local↔API and
-  Claude↔OpenAI↔Gemini by config (Open/Closed, Dependency Inversion).
-- **Per-queue workers** enforce single responsibility at the infrastructure
-  level and let expensive stages (ASR, LLM) scale independently.
-- **Typed error hierarchy** (`TransientError` vs `PermanentError`) drives retry
-  decisions without string-matching; transient failures retry with backoff,
-  permanent failures fail fast and abort the chain.
-- **Same Pydantic schema** instructs the LLM (embedded JSON schema) and validates
-  its response; invalid JSON gets a tolerant repair + one bounded reprompt.
-- **Structured logging** (structlog) with `job_id` bound across API and workers.
-
-## Future improvements
+## Future implementation
 
 Designed to be extended without modifying existing modules:
 
@@ -313,4 +348,28 @@ Designed to be extended without modifying existing modules:
 - **Auth & multi-tenancy** — user scoping on jobs; API keys / OAuth.
 - **Observability** — export the per-stage latency read model to Prometheus/OTel.
 - **Webhooks / WebSocket** — push job completion instead of client polling.
-```
+
+---
+
+## Conclusion
+
+SheryMeet is a small but complete, production-oriented system: it takes a messy
+real-world input (an audio recording) and returns something a team can actually
+use (a shareable summary and an owned checklist), end to end, asynchronously.
+
+A few deliberate design decisions hold it together:
+
+- **Ports & adapters** for ASR/LLM/storage → swap Whisper local↔API and
+  Claude↔OpenAI↔Gemini by config (Open/Closed, Dependency Inversion).
+- **Per-queue workers** enforce single responsibility at the infrastructure
+  level and let expensive stages (ASR, LLM) scale independently.
+- **Typed error hierarchy** (`TransientError` vs `PermanentError`) drives retry
+  decisions without string-matching; transient failures retry with backoff,
+  permanent failures fail fast and abort the chain.
+- **Same Pydantic schema** instructs the LLM (embedded JSON schema) and validates
+  its response; invalid JSON gets a tolerant repair + one bounded reprompt.
+- **Structured logging** (structlog) with `job_id` bound across API and workers.
+
+The result is a codebase that reads as a reference for structuring an async AI
+pipeline — durable job state, clean boundaries, and swappable models — and one
+that is straightforward to extend along the directions above.

@@ -1,9 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
+import { useEffect } from "react";
 
 import { getJob, TERMINAL_STATUSES } from "@/api/jobs";
 import type { JobStatus } from "@/api/jobs";
 import { Button, Card, ProgressBar, StatusPill, cx } from "@/components/ui";
 import { PIPELINE_STEPS, statusIndex, statusLabel, statusTone } from "@/lib/status";
+import { updateJob } from "@/lib/history";
 import { ResultView } from "@/features/result/ResultView";
 
 /**
@@ -21,6 +23,12 @@ export function JobStatusView({ jobId, onReset }: { jobId: string; onReset: () =
       return status && TERMINAL_STATUSES.includes(status) ? false : 1000;
     },
   });
+
+  // Keep this device's history in sync with the job's live status.
+  const status = data?.status;
+  useEffect(() => {
+    if (status) updateJob(jobId, { status });
+  }, [jobId, status]);
 
   if (error) {
     return (
