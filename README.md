@@ -356,20 +356,3 @@ Designed to be extended without modifying existing modules:
 SheryMeet is a small but complete, production-oriented system: it takes a messy
 real-world input (an audio recording) and returns something a team can actually
 use (a shareable summary and an owned checklist), end to end, asynchronously.
-
-A few deliberate design decisions hold it together:
-
-- **Ports & adapters** for ASR/LLM/storage → swap Whisper local↔API and
-  Claude↔OpenAI↔Gemini by config (Open/Closed, Dependency Inversion).
-- **Per-queue workers** enforce single responsibility at the infrastructure
-  level and let expensive stages (ASR, LLM) scale independently.
-- **Typed error hierarchy** (`TransientError` vs `PermanentError`) drives retry
-  decisions without string-matching; transient failures retry with backoff,
-  permanent failures fail fast and abort the chain.
-- **Same Pydantic schema** instructs the LLM (embedded JSON schema) and validates
-  its response; invalid JSON gets a tolerant repair + one bounded reprompt.
-- **Structured logging** (structlog) with `job_id` bound across API and workers.
-
-The result is a codebase that reads as a reference for structuring an async AI
-pipeline — durable job state, clean boundaries, and swappable models — and one
-that is straightforward to extend along the directions above.
